@@ -20,7 +20,11 @@ export interface StorageDriver {
 class LocalDriver implements StorageDriver {
   baseDir: string;
   constructor() {
-    this.baseDir = path.resolve(process.env.STORAGE_LOCAL_DIR ?? "./uploads");
+    // Vercel & serverless platform: filesystem read-only kecuali /tmp.
+    // Auto-fallback ke /tmp/uploads kalau di production tanpa volume mount.
+    const isServerless = !!process.env.VERCEL || !!process.env.LAMBDA_TASK_ROOT;
+    const defaultDir = isServerless ? "/tmp/uploads" : "./uploads";
+    this.baseDir = path.resolve(process.env.STORAGE_LOCAL_DIR ?? defaultDir);
   }
   private resolve(key: string) {
     return path.join(this.baseDir, key);
