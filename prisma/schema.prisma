@@ -1,0 +1,1327 @@
+// =====================================================================
+// KLINIK KECANTIKAN — PRISMA SCHEMA
+// Single klinik. RBAC granular. Bilingual UI (data-language agnostic).
+// All money stored as Decimal(14,2) IDR. All timestamps UTC, render TZ Asia/Jakarta.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================================
+// AUTH & RBAC
+// =====================================================================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String
+  name          String
+  phone         String?
+  avatarUrl     String?
+  isActive      Boolean   @default(true)
+  lastLoginAt   DateTime?
+  locale        String    @default("id") // id | en
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  roles         UserRole[]
+  staffProfile  StaffProfile?
+
+  // audit relations
+  auditLogs     AuditLog[]
+  photoAccess   PhotoAccessLog[]
+
+  @@index([email])
+}
+
+model Role {
+  id           String        @id @default(cuid())
+  code         String        @unique // ADMIN, RECEPTIONIST, DOCTOR, THERAPIST, CASHIER, PHARMACIST, MANAGER, OWNER
+  name         String
+  description  String?
+  isSystem     Boolean       @default(false)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  users        UserRole[]
+  permissions  RolePermission[]
+}
+
+model Permission {
+  id          String           @id @default(cuid())
+  code        String           @unique // e.g. "patient.read", "patient.write", "kasir.refund"
+  module      String           // FRONT_OFFICE | MEDICAL | OPS | FINANCIAL | CRM | DASHBOARD | SETTINGS
+  description String?
+
+  roles       RolePermission[]
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+// Staff profile for medical staff (dokter, therapist) — extended attributes
+model StaffProfile {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  staffType     StaffType
+  licenseNumber String?  // STR untuk dokter, sertifikat untuk therapist
+  specialty     String?  // dermatology, aesthetic, dll
+  bio           String?
+  commissionPct Decimal? @db.Decimal(5, 2) // %, untuk therapist/dokter
+  color         String?  // hex untuk kalender
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  appointments  Appointment[]   @relation("StaffPrimary")
+  treatmentsDone TreatmentItem[] @relation("PerformedBy")
+  diagnoses     Diagnosis[]
+  prescriptions Prescription[]
+  schedules     StaffSchedule[]
+  timeOff       StaffTimeOff[]
+}
+
+enum StaffType {
+  DOCTOR
+  THERAPIST
+  NURSE
+  OTHER
+}
+
+model StaffSchedule {
+  id        String   @id @default(cuid())
+  staffId   String
+  staff    StaffProfile @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  // Weekly availability template
+  dayOfWeek Int      // 0=Sun..6=Sat
+  startTime String   // "09:00"
+  endTime   String   // "17:00"
+
+  @@index([staffId, dayOfWeek])
+}
+
+model StaffTimeOff {
+  id        String   @id @default(cuid())
+  staffId   String
+  staff     StaffProfile @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  startsAt  DateTime
+  endsAt    DateTime
+  reason    String?
+}
+
+// =====================================================================
+// PASIEN / MEMBERSHIP
+// =====================================================================
+
+model Patient {
+  id            String   @id @default(cuid())
+  mrn           String   @unique // medical record number, e.g. RM-2026-00001
+  firstName     String
+  lastName      String?
+  fullName      String   // denormalized for search
+  email         String?
+  phone         String   // unique-ish, primary identifier for WA
+  whatsappOptIn Boolean  @default(true)
+  gender        Gender?
+  birthDate     DateTime?
+  birthPlace    String?
+  nationality   String?  @default("ID")
+  idNumber      String?  // KTP/passport
+  address       String?
+  city          String?
+  province      String?
+  postalCode    String?
+  occupation    String?
+  emergencyName  String?
+  emergencyPhone String?
+  notes         String?
+  // Medical defaults captured at registration (extended in MedicalRecord)
+  bloodType     String?
+  knownAllergies String?
+  skinType      String?  // OILY, DRY, COMBINATION, SENSITIVE, NORMAL
+  fitzpatrick   String?  // I..VI
+
+  // Membership
+  membershipTierId String?
+  membershipTier   MembershipTier? @relation(fields: [membershipTierId], references: [id])
+  membershipSince  DateTime?
+  loyaltyPoints    Int @default(0)
+  referralCode     String?  @unique
+  referredById     String?
+  referredBy       Patient? @relation("PatientReferral", fields: [referredById], references: [id])
+  referrals        Patient[] @relation("PatientReferral")
+
+  consentSigned    Boolean   @default(false)
+  consentSignedAt  DateTime?
+  consentDocUrl    String?
+
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  appointments    Appointment[]
+  queueTickets    QueueTicket[]
+  medicalRecords  MedicalRecord[]
+  prescriptions   Prescription[]
+  invoices        Invoice[]
+  treatmentPackages PatientPackage[]
+  loyaltyLedger   LoyaltyLedger[]
+  followUpTasks   FollowUpTask[]
+  beforeAfterPhotos BeforeAfterPhoto[]
+  consents        ConsentSignature[]
+
+  @@index([phone])
+  @@index([fullName])
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+model MembershipTier {
+  id              String  @id @default(cuid())
+  code            String  @unique // SILVER, GOLD, PLATINUM
+  name            String
+  minSpend        Decimal @db.Decimal(14, 2) @default(0) // min lifetime spend to qualify
+  discountPct     Decimal @db.Decimal(5, 2)  @default(0)
+  pointMultiplier Decimal @db.Decimal(5, 2)  @default(1)
+  birthdayBonus   Int     @default(0)
+  anniversaryBonus Int    @default(0)
+  benefitsJson    Json?   // free description of perks
+  color           String? // hex
+  isActive        Boolean @default(true)
+
+  patients        Patient[]
+}
+
+// =====================================================================
+// SERVICES (Treatment catalog) & PACKAGES
+// =====================================================================
+
+model TreatmentCategory {
+  id         String      @id @default(cuid())
+  code       String      @unique // FACIAL, LASER, INJECTION, BODY, ...
+  nameId     String
+  nameEn     String?
+  parentId   String?
+  parent     TreatmentCategory? @relation("CategoryTree", fields: [parentId], references: [id])
+  children   TreatmentCategory[] @relation("CategoryTree")
+  treatments Treatment[]
+  template   RecordTemplate?
+}
+
+model Treatment {
+  id              String   @id @default(cuid())
+  code            String   @unique // T-001
+  nameId          String
+  nameEn          String?
+  categoryId      String
+  category        TreatmentCategory @relation(fields: [categoryId], references: [id])
+  durationMinutes Int      @default(30)
+  price           Decimal  @db.Decimal(14, 2)
+  cost            Decimal  @db.Decimal(14, 2) @default(0) // HPP est.
+  taxPct          Decimal  @db.Decimal(5, 2)  @default(0)
+  description     String?
+  requiresDoctor  Boolean  @default(false) // konsultasi/tindakan dokter wajib
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  consumables     TreatmentConsumable[]
+  appointmentItems AppointmentTreatment[]
+  treatmentItems  TreatmentItem[]
+  packageItems    TreatmentPackageItem[]
+  promoApplicableTo PromoApplicableTreatment[]
+}
+
+// Bahan habis pakai per treatment (auto-deduct stok saat treatment selesai)
+model TreatmentConsumable {
+  id          String @id @default(cuid())
+  treatmentId String
+  itemId      String
+  qty         Decimal @db.Decimal(12, 3)
+
+  treatment Treatment    @relation(fields: [treatmentId], references: [id], onDelete: Cascade)
+  item      InventoryItem @relation(fields: [itemId], references: [id])
+
+  @@unique([treatmentId, itemId])
+}
+
+// Paket Treatment (bundling sesi + bundle treatment + expiry)
+model TreatmentPackage {
+  id             String   @id @default(cuid())
+  code           String   @unique
+  nameId         String
+  nameEn         String?
+  description    String?
+  price          Decimal  @db.Decimal(14, 2)
+  validityDays   Int?     // null = unlimited
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  items          TreatmentPackageItem[]
+  patientPackages PatientPackage[]
+}
+
+model TreatmentPackageItem {
+  id           String  @id @default(cuid())
+  packageId    String
+  treatmentId  String
+  sessions     Int     @default(1) // berapa kali bisa dipakai
+
+  package   TreatmentPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  treatment Treatment        @relation(fields: [treatmentId], references: [id])
+
+  @@unique([packageId, treatmentId])
+}
+
+// Pasien yang udah beli paket — track sisa sesi & expiry
+model PatientPackage {
+  id           String   @id @default(cuid())
+  patientId    String
+  packageId    String
+  invoiceId    String?  // dari mana dibeli
+  purchasedAt  DateTime @default(now())
+  expiresAt    DateTime?
+  status       PackageStatus @default(ACTIVE)
+  notes        String?
+
+  patient   Patient          @relation(fields: [patientId], references: [id])
+  package   TreatmentPackage @relation(fields: [packageId], references: [id])
+  invoice   Invoice?         @relation(fields: [invoiceId], references: [id])
+  usages    PatientPackageUsage[]
+
+  @@index([patientId, status])
+}
+
+enum PackageStatus {
+  ACTIVE
+  EXHAUSTED
+  EXPIRED
+  CANCELLED
+}
+
+// Catatan setiap kali sesi paket dipakai
+model PatientPackageUsage {
+  id               String   @id @default(cuid())
+  patientPackageId String
+  treatmentItemId  String?  @unique // satu sesi = satu treatment item dilakukan
+  treatmentId      String
+  usedAt           DateTime @default(now())
+
+  patientPackage PatientPackage @relation(fields: [patientPackageId], references: [id], onDelete: Cascade)
+  treatmentItem  TreatmentItem? @relation(fields: [treatmentItemId], references: [id])
+
+  @@index([patientPackageId])
+}
+
+// =====================================================================
+// FRONT OFFICE: APPOINTMENT, CHECK-IN, ANTRIAN
+// =====================================================================
+
+model Appointment {
+  id            String          @id @default(cuid())
+  code          String          @unique // APT-2026-00001
+  patientId     String
+  patient       Patient         @relation(fields: [patientId], references: [id])
+  primaryStaffId String?        // dokter utama (nullable kalau therapist saja)
+  primaryStaff  StaffProfile?   @relation("StaffPrimary", fields: [primaryStaffId], references: [id])
+  startAt       DateTime
+  endAt         DateTime
+  status        AppointmentStatus @default(BOOKED)
+  source        AppointmentSource @default(INTERNAL)
+  notes         String?
+  cancelReason  String?
+  cancelledAt   DateTime?
+  cancelledBy   String?
+  reminderSentAt DateTime?
+
+  treatments    AppointmentTreatment[]
+  queueTicket   QueueTicket?
+  medicalRecord MedicalRecord?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([startAt])
+  @@index([status])
+}
+
+enum AppointmentStatus {
+  BOOKED          // booked, belum hari H
+  CONFIRMED       // dikonfirmasi via WA/telp
+  CHECKED_IN      // pasien sudah datang
+  IN_CONSULTATION
+  IN_TREATMENT
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum AppointmentSource {
+  INTERNAL  // staff yang input
+  PUBLIC    // form publik di website
+  WHATSAPP
+  WALK_IN
+}
+
+// Treatment yang akan/sudah dilakukan dalam satu appointment (tentative plan)
+model AppointmentTreatment {
+  id            String  @id @default(cuid())
+  appointmentId String
+  treatmentId   String
+  // diisi saat booking (rencana), bisa di-revisi saat konsultasi
+  plannedQty    Int     @default(1)
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  treatment   Treatment   @relation(fields: [treatmentId], references: [id])
+}
+
+// Antrian per stage — dipanggil sesuai urutan
+model QueueTicket {
+  id            String       @id @default(cuid())
+  appointmentId String?      @unique
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  patientId     String
+  patient       Patient      @relation(fields: [patientId], references: [id])
+  number        String       // A001, B002 (per stage prefix)
+  stage         QueueStage   @default(WAITING_CONSULT)
+  status        QueueStatus  @default(WAITING)
+  calledAt      DateTime?
+  servedAt      DateTime?
+  finishedAt    DateTime?
+  servedById    String?      // staff yang melayani saat itu
+  waNotifiedAt  DateTime?    // saat notif "almost your turn" terkirim
+  date          DateTime     @db.Date
+
+  history       QueueTicketHistory[]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([date, stage, status])
+}
+
+enum QueueStage {
+  WAITING_CONSULT     // tunggu konsultasi dokter
+  WAITING_TREATMENT   // tunggu treatment therapist
+  WAITING_PHARMACY    // tunggu resep farmasi
+  WAITING_CASHIER     // tunggu bayar
+  DONE
+}
+
+enum QueueStatus {
+  WAITING
+  CALLED       // sudah dipanggil
+  IN_PROGRESS  // sedang dilayani
+  COMPLETED    // selesai stage ini, bisa lanjut stage berikutnya
+  SKIPPED
+}
+
+model QueueTicketHistory {
+  id          String      @id @default(cuid())
+  ticketId    String
+  ticket      QueueTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  fromStage   QueueStage?
+  toStage     QueueStage
+  fromStatus  QueueStatus?
+  toStatus    QueueStatus
+  byUserId    String?
+  note        String?
+  at          DateTime    @default(now())
+}
+
+// =====================================================================
+// MEDICAL: REKAM MEDIS, DIAGNOSA, TREATMENT, BEFORE-AFTER, RESEP
+// =====================================================================
+
+// Template rekam medis per kategori treatment (form terstruktur)
+model RecordTemplate {
+  id          String   @id @default(cuid())
+  categoryId  String   @unique
+  category    TreatmentCategory @relation(fields: [categoryId], references: [id])
+  name        String
+  schemaJson  Json     // JSON schema -> renderable form
+  version     Int      @default(1)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model MedicalRecord {
+  id            String   @id @default(cuid())
+  code          String   @unique // MR-2026-00001
+  patientId     String
+  patient       Patient  @relation(fields: [patientId], references: [id])
+  appointmentId String?  @unique
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  visitDate     DateTime @default(now())
+
+  // Anamnesa & vital
+  chiefComplaint  String?
+  historyOfIllness String?
+  allergies       String?
+  currentMeds     String?
+  pastTreatments  String?
+
+  vitalSignsJson  Json?  // BP, HR, RR, temp, weight, height
+  // Kulit (klinik kecantikan)
+  skinAssessmentJson Json? // pH, hydration, oil, pigmentation, elasticity, dll
+  fitzpatrick     String?
+
+  // Form data berdasarkan template kategori treatment
+  templateId      String?
+  templateData    Json?
+
+  // Face / body mapping — coordinates of marks
+  faceMapJson     Json?  // [{x,y,label,severity,note}, ...]
+
+  // Plan
+  plan            String?
+  doctorNotes     String?
+
+  diagnoses       Diagnosis[]
+  prescriptions   Prescription[]
+  treatmentItems  TreatmentItem[]
+  beforeAfterPhotos BeforeAfterPhoto[]
+  attachments     RecordAttachment[]
+
+  createdById     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([patientId, visitDate])
+}
+
+model Diagnosis {
+  id              String  @id @default(cuid())
+  medicalRecordId String
+  medicalRecord   MedicalRecord @relation(fields: [medicalRecordId], references: [id], onDelete: Cascade)
+  code            String? // ICD-10 optional
+  label           String  // free text diagnosa
+  isPrimary       Boolean @default(false)
+  notes           String?
+  diagnosedById   String?
+  diagnosedBy     StaffProfile? @relation(fields: [diagnosedById], references: [id])
+  createdAt       DateTime @default(now())
+}
+
+// Treatment yang benar-benar dilakukan (vs AppointmentTreatment yang hanya rencana)
+model TreatmentItem {
+  id              String   @id @default(cuid())
+  medicalRecordId String?
+  medicalRecord   MedicalRecord? @relation(fields: [medicalRecordId], references: [id])
+  appointmentId   String?
+  patientId       String
+  treatmentId     String
+  treatment       Treatment @relation(fields: [treatmentId], references: [id])
+  performedById   String?
+  performedBy     StaffProfile? @relation("PerformedBy", fields: [performedById], references: [id])
+  performedAt     DateTime  @default(now())
+  qty             Int       @default(1)
+  unitPrice       Decimal   @db.Decimal(14, 2)
+  discountPct     Decimal   @db.Decimal(5, 2) @default(0)
+  discountAmount  Decimal   @db.Decimal(14, 2) @default(0)
+  total           Decimal   @db.Decimal(14, 2)
+  // Sumber: paket pasien atau bayar reguler?
+  patientPackageUsageId String?
+  packageUsage    PatientPackageUsage?
+  notes           String?
+  // Outcome tracking
+  outcome         String?   // SUCCESS, PARTIAL, FAILED, FOLLOWUP_NEEDED
+  outcomeNotes    String?
+
+  invoiceItemId   String?   @unique
+  invoiceItem     InvoiceItem? @relation(fields: [invoiceItemId], references: [id])
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([patientId, performedAt])
+  @@index([treatmentId])
+}
+
+// Foto Before-After dengan compliance (consent + watermark + signed url + audit)
+model BeforeAfterPhoto {
+  id              String   @id @default(cuid())
+  patientId       String
+  patient         Patient  @relation(fields: [patientId], references: [id])
+  medicalRecordId String?
+  medicalRecord   MedicalRecord? @relation(fields: [medicalRecordId], references: [id])
+  treatmentId     String?
+  kind            PhotoKind
+  storageKey      String   // path di storage (S3 key atau local relative path)
+  watermarked     Boolean  @default(false)
+  bodyArea        String?  // FACE_FRONT, FACE_LEFT, FACE_RIGHT, BACK, etc.
+  takenAt         DateTime @default(now())
+  consentId       String?  // link ke consent yang ditandatangani
+  consent         ConsentSignature? @relation(fields: [consentId], references: [id])
+  notes           String?
+  uploadedById    String?
+  isPublishable   Boolean  @default(false) // pasien izinkan untuk dipublikasikan / marketing
+
+  accessLogs      PhotoAccessLog[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([patientId, kind, takenAt])
+}
+
+enum PhotoKind {
+  BEFORE
+  AFTER
+  PROGRESS
+}
+
+model PhotoAccessLog {
+  id        String   @id @default(cuid())
+  photoId   String
+  photo     BeforeAfterPhoto @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  action    String   // VIEW | DOWNLOAD | SHARE
+  ipAddress String?
+  userAgent String?
+  at        DateTime @default(now())
+
+  @@index([photoId, at])
+}
+
+model RecordAttachment {
+  id              String   @id @default(cuid())
+  medicalRecordId String
+  medicalRecord   MedicalRecord @relation(fields: [medicalRecordId], references: [id], onDelete: Cascade)
+  filename        String
+  storageKey      String
+  mimeType        String
+  size            Int
+  uploadedAt      DateTime @default(now())
+}
+
+model ConsentSignature {
+  id           String   @id @default(cuid())
+  patientId    String
+  patient      Patient  @relation(fields: [patientId], references: [id])
+  consentType  String   // GENERAL, PHOTO_USE, MARKETING, MEDICAL_PROCEDURE
+  documentUrl  String?  // PDF consent
+  signatureUrl String?  // PNG dari signature pad
+  signedAt     DateTime @default(now())
+  ipAddress    String?
+  meta         Json?
+
+  photos       BeforeAfterPhoto[]
+}
+
+// =====================================================================
+// FARMASI / RESEP
+// =====================================================================
+
+model Prescription {
+  id              String   @id @default(cuid())
+  code            String   @unique // RX-2026-00001
+  patientId       String
+  patient         Patient  @relation(fields: [patientId], references: [id])
+  medicalRecordId String?
+  medicalRecord   MedicalRecord? @relation(fields: [medicalRecordId], references: [id])
+  doctorId        String
+  doctor          StaffProfile @relation(fields: [doctorId], references: [id])
+  status          PrescriptionStatus @default(ISSUED)
+  issuedAt        DateTime @default(now())
+  dispensedAt     DateTime?
+  dispensedById   String?
+  signatureUrl    String?  // tanda tangan digital dokter (image)
+  notes           String?
+
+  items           PrescriptionItem[]
+  invoiceItems    InvoiceItem[]   @relation("InvoiceFromPrescription")
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([patientId, issuedAt])
+}
+
+enum PrescriptionStatus {
+  ISSUED      // dokter issued, belum ditebus
+  DISPENSED   // sudah disiapkan & diberikan ke pasien
+  CANCELLED
+}
+
+model PrescriptionItem {
+  id             String   @id @default(cuid())
+  prescriptionId String
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+  // Item bisa dari katalog inventory atau racikan compounding
+  itemId         String?
+  item           InventoryItem? @relation(fields: [itemId], references: [id])
+  isCompound     Boolean  @default(false)
+  compoundName   String?  // kalau racikan
+  compoundFormulaJson Json? // [{itemId, qty}, ...]
+  qty            Decimal  @db.Decimal(12, 3)
+  unit           String   // tube, btl, tab
+  dosage         String?  // 1x sehari, oles tipis
+  duration       String?  // 14 hari
+  notes          String?
+  // pricing
+  unitPrice      Decimal  @db.Decimal(14, 2) @default(0)
+  total          Decimal  @db.Decimal(14, 2) @default(0)
+
+  invoiceItemId  String?  @unique
+  invoiceItem    InvoiceItem? @relation(fields: [invoiceItemId], references: [id])
+}
+
+// =====================================================================
+// INVENTORY (Farmasi + Consumables + Retail) — batch & expired tracking
+// =====================================================================
+
+model Supplier {
+  id           String   @id @default(cuid())
+  code         String   @unique
+  name         String
+  contactName  String?
+  phone        String?
+  email        String?
+  address      String?
+  taxId        String?
+  notes        String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  itemSuppliers ItemSupplier[]
+  purchaseOrders PurchaseOrder[]
+}
+
+model InventoryCategory {
+  id     String  @id @default(cuid())
+  code   String  @unique
+  nameId String
+  nameEn String?
+  parentId String?
+  parent   InventoryCategory? @relation("InvCatTree", fields: [parentId], references: [id])
+  children InventoryCategory[] @relation("InvCatTree")
+
+  items  InventoryItem[]
+}
+
+model InventoryItem {
+  id            String   @id @default(cuid())
+  sku           String   @unique
+  barcode       String?  @unique
+  nameId        String
+  nameEn        String?
+  description   String?
+  itemType      ItemType
+  categoryId    String?
+  category      InventoryCategory? @relation(fields: [categoryId], references: [id])
+  unit          String   // pcs, btl, tube, ml, gr
+  // Inventory pricing
+  costPrice     Decimal  @db.Decimal(14, 2) @default(0) // moving avg or last cost
+  sellingPrice  Decimal  @db.Decimal(14, 2) @default(0)
+  taxPct        Decimal  @db.Decimal(5, 2)  @default(0)
+  // Stock control
+  reorderPoint  Decimal  @db.Decimal(12, 3) @default(0)
+  reorderQty    Decimal  @db.Decimal(12, 3) @default(0)
+  isBatchTracked Boolean @default(false) // wajib true untuk obat & skincare
+  // Drug-specific
+  isControlledDrug Boolean @default(false)
+  activeIngredients Json? // [{name, strength}] untuk drug interaction check
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  batches       InventoryBatch[]
+  movements     StockMovement[]
+  itemSuppliers ItemSupplier[]
+  prescriptionItems PrescriptionItem[]
+  treatmentConsumables TreatmentConsumable[]
+  invoiceItems  InvoiceItem[]
+  poItems       PurchaseOrderItem[]
+}
+
+enum ItemType {
+  DRUG          // obat (resep)
+  SKINCARE      // skincare retail (jual)
+  CONSUMABLE    // bahan habis pakai (untuk treatment)
+  EQUIPMENT     // alat (tracked, bukan consumable)
+  OTHER
+}
+
+model ItemSupplier {
+  id          String  @id @default(cuid())
+  itemId      String
+  supplierId  String
+  supplierSku String?
+  lastPrice   Decimal @db.Decimal(14, 2) @default(0)
+  leadTimeDays Int?
+  isPrimary   Boolean @default(false)
+
+  item     InventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  supplier Supplier      @relation(fields: [supplierId], references: [id])
+
+  @@unique([itemId, supplierId])
+}
+
+model InventoryBatch {
+  id          String   @id @default(cuid())
+  itemId      String
+  item        InventoryItem @relation(fields: [itemId], references: [id])
+  batchNo     String
+  expiredAt   DateTime?
+  receivedAt  DateTime @default(now())
+  quantity    Decimal  @db.Decimal(12, 3) // current remaining qty
+  initialQty  Decimal  @db.Decimal(12, 3)
+  costPrice   Decimal  @db.Decimal(14, 2) @default(0)
+  supplierId  String?
+  poItemId    String?
+  notes       String?
+
+  movements   StockMovement[]
+
+  @@unique([itemId, batchNo])
+  @@index([expiredAt])
+}
+
+model StockMovement {
+  id          String   @id @default(cuid())
+  itemId      String
+  item        InventoryItem @relation(fields: [itemId], references: [id])
+  batchId     String?
+  batch       InventoryBatch? @relation(fields: [batchId], references: [id])
+  movementType MovementType
+  quantity    Decimal  @db.Decimal(12, 3) // negative for OUT
+  refType     String?  // PO, INVOICE, TREATMENT, ADJUSTMENT, OPNAME, RETURN
+  refId       String?
+  reason      String?
+  byUserId    String?
+  at          DateTime @default(now())
+
+  @@index([itemId, at])
+  @@index([refType, refId])
+}
+
+enum MovementType {
+  PURCHASE_IN
+  SALE_OUT
+  TREATMENT_OUT  // auto-deduct consumable saat treatment
+  PRESCRIPTION_OUT
+  ADJUSTMENT_IN
+  ADJUSTMENT_OUT
+  OPNAME_IN
+  OPNAME_OUT
+  RETURN_IN
+  TRANSFER_IN
+  TRANSFER_OUT
+  EXPIRED_OUT
+}
+
+// Stock opname — audit fisik vs sistem
+model StockOpname {
+  id          String @id @default(cuid())
+  code        String @unique
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+  status      OpnameStatus @default(DRAFT)
+  notes       String?
+  createdById String?
+
+  items       StockOpnameItem[]
+}
+
+enum OpnameStatus {
+  DRAFT
+  IN_PROGRESS
+  COMMITTED
+  CANCELLED
+}
+
+model StockOpnameItem {
+  id        String  @id @default(cuid())
+  opnameId  String
+  opname    StockOpname @relation(fields: [opnameId], references: [id], onDelete: Cascade)
+  itemId    String
+  batchId   String?
+  systemQty Decimal @db.Decimal(12, 3)
+  physicalQty Decimal @db.Decimal(12, 3)
+  diff      Decimal @db.Decimal(12, 3)
+  note      String?
+}
+
+// Purchase Order ke supplier
+model PurchaseOrder {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  supplierId  String
+  supplier    Supplier @relation(fields: [supplierId], references: [id])
+  status      POStatus @default(DRAFT)
+  orderedAt   DateTime @default(now())
+  expectedAt  DateTime?
+  receivedAt  DateTime?
+  subtotal    Decimal  @db.Decimal(14, 2) @default(0)
+  taxAmount   Decimal  @db.Decimal(14, 2) @default(0)
+  grandTotal  Decimal  @db.Decimal(14, 2) @default(0)
+  notes       String?
+  createdById String?
+
+  items       PurchaseOrderItem[]
+}
+
+enum POStatus {
+  DRAFT
+  ORDERED
+  PARTIAL
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrderItem {
+  id          String @id @default(cuid())
+  poId        String
+  po          PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        InventoryItem @relation(fields: [itemId], references: [id])
+  qty         Decimal @db.Decimal(12, 3)
+  receivedQty Decimal @db.Decimal(12, 3) @default(0)
+  unitCost    Decimal @db.Decimal(14, 2)
+  total       Decimal @db.Decimal(14, 2)
+  batchNo     String?
+  expiredAt   DateTime?
+}
+
+// =====================================================================
+// FINANCIAL: KASIR, INVOICE, PAYMENT, DEPOSIT (kas klinik)
+// =====================================================================
+
+model Invoice {
+  id           String        @id @default(cuid())
+  code         String        @unique // INV-2026-00001
+  patientId    String
+  patient      Patient       @relation(fields: [patientId], references: [id])
+  appointmentId String?
+  status       InvoiceStatus @default(DRAFT)
+  issuedAt     DateTime      @default(now())
+  dueAt        DateTime?
+  // Pricing breakdown
+  subtotal     Decimal @db.Decimal(14, 2) @default(0)
+  discountTotal Decimal @db.Decimal(14, 2) @default(0)
+  taxTotal     Decimal @db.Decimal(14, 2) @default(0)
+  grandTotal   Decimal @db.Decimal(14, 2) @default(0)
+  paidTotal    Decimal @db.Decimal(14, 2) @default(0)
+  // Promos & loyalty
+  promoCode    String?
+  promoId      String?
+  promo        Promo?  @relation(fields: [promoId], references: [id])
+  pointsUsed   Int     @default(0)
+  pointsEarned Int     @default(0)
+  notes        String?
+  cashierId    String?
+  voidedAt     DateTime?
+  voidReason   String?
+
+  items        InvoiceItem[]
+  payments     Payment[]
+  patientPackages PatientPackage[]
+  loyaltyEntries  LoyaltyLedger[]
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([issuedAt, status])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  PENDING       // dikirim ke kasir, belum dibayar
+  PARTIALLY_PAID
+  PAID
+  VOID
+  REFUNDED
+}
+
+model InvoiceItem {
+  id          String @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  itemType    InvoiceItemType
+  // Polymorphic source
+  treatmentId String?
+  inventoryItemId String?
+  inventoryItem InventoryItem? @relation(fields: [inventoryItemId], references: [id])
+  packageId   String?
+  prescriptionId String?
+  prescription Prescription? @relation("InvoiceFromPrescription", fields: [prescriptionId], references: [id])
+  description String
+  qty         Decimal @db.Decimal(12, 3) @default(1)
+  unitPrice   Decimal @db.Decimal(14, 2)
+  discountPct Decimal @db.Decimal(5, 2)  @default(0)
+  discountAmount Decimal @db.Decimal(14, 2) @default(0)
+  taxPct      Decimal @db.Decimal(5, 2)  @default(0)
+  taxAmount   Decimal @db.Decimal(14, 2) @default(0)
+  total       Decimal @db.Decimal(14, 2)
+
+  treatmentItem TreatmentItem?
+  prescriptionItem PrescriptionItem?
+}
+
+enum InvoiceItemType {
+  TREATMENT
+  PRODUCT       // skincare retail
+  PRESCRIPTION
+  PACKAGE       // beli paket
+  OTHER         // misc fee, admin, dll
+}
+
+model Payment {
+  id         String        @id @default(cuid())
+  invoiceId  String
+  invoice    Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  method     PaymentMethod
+  amount     Decimal       @db.Decimal(14, 2)
+  reference  String?       // EDC ref no, QRIS trx no, dll
+  paidAt     DateTime      @default(now())
+  receivedById String?
+  notes      String?
+
+  // Cashflow link to deposit/kas klinik
+  cashEntryId String?       @unique
+  cashEntry   CashEntry?    @relation(fields: [cashEntryId], references: [id])
+}
+
+enum PaymentMethod {
+  CASH
+  EDC_DEBIT
+  EDC_CREDIT
+  QRIS
+  BANK_TRANSFER
+  POINTS_REDEMPTION
+  OTHER
+}
+
+// =====================================================================
+// DEPOSIT (kas klinik) — pendapatan & pengeluaran perusahaan
+// =====================================================================
+
+model CashAccount {
+  id         String  @id @default(cuid())
+  code       String  @unique
+  name       String  // Kas Tunai, Bank BCA, EDC BNI, QRIS, dll
+  accountType CashAccountType
+  bankName   String?
+  accountNo  String?
+  isActive   Boolean @default(true)
+  // Saldo dihitung dari sum CashEntry
+  openingBalance Decimal @db.Decimal(14, 2) @default(0)
+
+  entries    CashEntry[]
+}
+
+enum CashAccountType {
+  CASH
+  BANK
+  EDC
+  EWALLET
+}
+
+model CashEntry {
+  id           String   @id @default(cuid())
+  accountId    String
+  account      CashAccount @relation(fields: [accountId], references: [id])
+  entryType    CashEntryType
+  amount       Decimal  @db.Decimal(14, 2) // positive=in, negative=out (tetap signed)
+  category     String?  // OPS_EXPENSE, SALARY, MAINTENANCE, REVENUE, REFUND, dll
+  refType      String?  // PAYMENT, EXPENSE, MANUAL
+  refId        String?
+  description  String
+  occurredAt   DateTime @default(now())
+  byUserId     String?
+  attachmentUrl String?
+  notes        String?
+
+  payment      Payment?
+  createdAt    DateTime @default(now())
+
+  @@index([accountId, occurredAt])
+}
+
+enum CashEntryType {
+  IN
+  OUT
+}
+
+// =====================================================================
+// CRM & MARKETING: PROMO, LOYALTY, FOLLOW-UP, WA REMINDER
+// =====================================================================
+
+model Promo {
+  id          String   @id @default(cuid())
+  code        String   @unique // voucher code; auto-promo bisa null code
+  name        String
+  description String?
+  promoType   PromoType
+  discountPct Decimal? @db.Decimal(5, 2)
+  discountAmount Decimal? @db.Decimal(14, 2)
+  // Auto-promo time window
+  isAutoApply Boolean @default(false)
+  startsAt    DateTime?
+  endsAt      DateTime?
+  daysOfWeek  Int[]    // 0..6, untuk happy hour
+  startTime   String?  // "14:00"
+  endTime     String?  // "17:00"
+  // Scope
+  minSpend    Decimal? @db.Decimal(14, 2)
+  maxDiscount Decimal? @db.Decimal(14, 2)
+  appliesTo   PromoScope @default(ALL)
+  // Targeting
+  targetTiers  String[] // tier code yang berhak
+  targetSegment PromoSegment? // NEW, RETURNING, INACTIVE
+  // Bundle (BOGO etc) — JSON rule
+  bundleRuleJson Json?
+  // Usage cap
+  maxUsesTotal Int?
+  maxUsesPerPatient Int? @default(1)
+  usesCount    Int @default(0)
+  isActive     Boolean @default(true)
+
+  applicableTreatments PromoApplicableTreatment[]
+  invoices    Invoice[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+enum PromoType {
+  PERCENT
+  AMOUNT
+  BUY_X_GET_Y
+  PACKAGE_DEAL
+}
+
+enum PromoScope {
+  ALL
+  TREATMENTS
+  PRODUCTS
+  PACKAGES
+  CATEGORY
+}
+
+enum PromoSegment {
+  NEW
+  RETURNING
+  INACTIVE
+  BIRTHDAY
+}
+
+model PromoApplicableTreatment {
+  promoId     String
+  treatmentId String
+
+  promo     Promo     @relation(fields: [promoId], references: [id], onDelete: Cascade)
+  treatment Treatment @relation(fields: [treatmentId], references: [id], onDelete: Cascade)
+
+  @@id([promoId, treatmentId])
+}
+
+// Loyalty point ledger (earn/redeem/expire/birthday/referral/anniversary)
+model LoyaltyLedger {
+  id         String   @id @default(cuid())
+  patientId  String
+  patient    Patient  @relation(fields: [patientId], references: [id])
+  delta      Int      // points + or -
+  reason     LoyaltyReason
+  invoiceId  String?
+  invoice    Invoice? @relation(fields: [invoiceId], references: [id])
+  refType    String?
+  refId      String?
+  notes      String?
+  occurredAt DateTime @default(now())
+
+  @@index([patientId, occurredAt])
+}
+
+enum LoyaltyReason {
+  EARN_TRANSACTION
+  REDEEM
+  REFERRAL_BONUS
+  BIRTHDAY_BONUS
+  ANNIVERSARY_BONUS
+  ADJUSTMENT
+  EXPIRY
+}
+
+// Follow-up tasks generated rule-based atau manual
+model FollowUpRule {
+  id            String   @id @default(cuid())
+  name          String
+  description   String?
+  triggerType   FollowUpTrigger
+  // Trigger config
+  daysAfter     Int?     // misal 3 = H+3 setelah trigger
+  treatmentCategoryId String?
+  segment       PromoSegment? // INACTIVE 90 days etc.
+  inactiveDays  Int?
+  // Action
+  templateId    String?
+  template      MessageTemplate? @relation(fields: [templateId], references: [id])
+  isActive      Boolean @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tasks         FollowUpTask[]
+}
+
+enum FollowUpTrigger {
+  AFTER_TREATMENT
+  AFTER_PURCHASE
+  PATIENT_INACTIVE
+  BIRTHDAY
+  PACKAGE_EXPIRING
+  APPOINTMENT_REMINDER
+  MANUAL
+}
+
+model FollowUpTask {
+  id          String   @id @default(cuid())
+  ruleId      String?
+  rule        FollowUpRule? @relation(fields: [ruleId], references: [id])
+  patientId   String
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  scheduledAt DateTime
+  status      FollowUpStatus @default(PENDING)
+  channel     CommChannel @default(WHATSAPP)
+  subject     String?
+  body        String?
+  sentAt      DateTime?
+  errorMsg    String?
+  responseRecorded Boolean @default(false)
+  responseSummary String?
+  assignedToId String?
+  notes       String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([scheduledAt, status])
+}
+
+enum FollowUpStatus {
+  PENDING
+  SENT
+  FAILED
+  RESPONDED
+  ESCALATED
+  DISMISSED
+}
+
+enum CommChannel {
+  WHATSAPP
+  SMS
+  EMAIL
+  PHONE_CALL
+}
+
+// Template pesan untuk WA reminder, follow-up, antrian, dll
+model MessageTemplate {
+  id          String   @id @default(cuid())
+  code        String   @unique // APPT_REMINDER_H1, QUEUE_ALMOST, FOLLOWUP_H3, BIRTHDAY
+  name        String
+  channel     CommChannel @default(WHATSAPP)
+  locale      String   @default("id")
+  subject     String?
+  body        String   // dengan placeholder {{patient.name}}, {{appointment.time}}, {{clinic.name}}
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  rules       FollowUpRule[]
+  outbox      MessageOutbox[]
+}
+
+model MessageOutbox {
+  id          String   @id @default(cuid())
+  templateId  String?
+  template    MessageTemplate? @relation(fields: [templateId], references: [id])
+  channel     CommChannel
+  toName      String?
+  toAddress   String   // phone, email
+  subject     String?
+  body        String
+  status      OutboxStatus @default(QUEUED)
+  scheduledAt DateTime @default(now())
+  sentAt      DateTime?
+  providerRef String?
+  errorMsg    String?
+  retries     Int @default(0)
+  // Link back
+  patientId   String?
+  refType     String?
+  refId       String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, scheduledAt])
+}
+
+enum OutboxStatus {
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+// =====================================================================
+// AUDIT LOG (umum)
+// =====================================================================
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String   // CREATE, UPDATE, DELETE, VIEW, LOGIN, LOGOUT
+  entity    String   // table name
+  entityId  String?
+  beforeJson Json?
+  afterJson  Json?
+  ipAddress String?
+  userAgent String?
+  at        DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([userId, at])
+}
+
+// =====================================================================
+// SETTINGS
+// =====================================================================
+
+model Setting {
+  key       String   @id
+  valueJson Json
+  updatedAt DateTime @updatedAt
+}
